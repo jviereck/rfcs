@@ -69,6 +69,72 @@ Does the inverse hold? Can a `&mut T` reference be used in places where a `&init
 
 (Not sure - is the following argumentation also valid? Let's assume `&mut <: &init T` would be a subtype. Also we have `&mut T <: &T` and `& T </: &init T` as well as `& T </: &init T`. Assuming `<:` is transitive, then `&mut T <: &init T </: &T` violates `&mut T <: &T` and similar `&mut T <: &T </: &init T` concludes as well `&mut T </: &init T`. So `&mut T` is not a subtype of `&init T`.)
 
+NOTE: The above statement about the subtyping relation for `&mut </: &init T` is per see correct, however, in the final specifiction the assignment of an `&mut T` pointer to an `&init T` pointer will be permitted as the assignment implies a change of the `&mut T` pointer to a `&mut T #multiplied` pointer (similar to the `#borrowed` annotation).
+
+## Introduction of `&init T` pointers in the system
+
+SEE: Notes from 24. Nov 2014
+
+$ 10 Feb 2015
+
+Basic idea:
+- The `&init T` pointers are created by an assignment from an `&mut T` pointer
+- Similar to how a `&mut T` pointer is annoated as `#borrowed` after the assignment to an `& T` pointer, the assignment of an `&mut T` pointer to an `&init T` pointer annotates the `&mut T` pointer as `#multiplied`
+- The main point is, that a `#multiplied` annotation is still on the `&mut T` pointer after the lifetime of the `&init T` pointer.
+
+Q: What prevents the `#multiplied` pointer from being returned from a function as a 'normal' `&mut T` poitner?
+-> You cannot assign a `&mut T #multiplied` pointer to a different `&mut T` pointer. This also means, that a `&mut T #multiplied` pointer cannot be used as return type for a `&mut T` function as the types are incompatible.
+-> You can assign a `&mut T #multiplied` pointer to a `& T` pointer and take a borrowed refernce this way
+
+-> The above might work out, but it makes it hard to ensure the passed in values are of the right type! Need to make sure the lifetime matches or come up with a way to require the passing in of `&init T` pointers directly to the function
+
+PROBLEM: Cannot use references to point to each other because of same lifetime :(
+
+## TDS - "Test Driven Specs"
+
+``` rust
+struct Node<'a> {
+	next: Option<&'a mut Node>
+}
+
+// This example should be prevented, as the passed in nodes are multiplied after
+// the method call.
+fn setup_refs<'a>(a: &'a mut Node<'a>, b: &'a mut Node<'a>) {
+	let a_init : &init Node = a;
+	let b_init : &init Node = b;
+
+	// Assign the `next` field of the nodes to create a cyclic referenced
+	//
+	//  a  ---> a.next
+	//  ^           |
+  //  |           V
+  //  b.next <--- b
+  //
+	a_init.next = b_init;
+	b_init.next = a_init;
+
+	// At this point, there should be an error. If the function just returns,
+	// then there are two mutable references to the same objects via
+	//   a.next == b
+	//   b.next == a
+	//
+}
+
+fn main() {
+	let mut a = Node { leaf: None }
+	let mut b = Node { leaf: None }
+
+	// This call should be possible.
+	// BUT: See 20150210/mut_assign.rs - rustc prevents this method call as the
+	//      lifetimes of a and b are not the same.
+	setup_refs(&mut a, &mut b);
+}
+
+```
+
+WANTED:
+- after the assignment of an `&mut T` to an `&init T` pointer, the original pointer should become `&mut T # borrowed`
+
 ## Viewpoint adaption for field read/write of `&init T` pointers
 
 TODO: Talk here about the need for `&init? T` pointers.
@@ -99,4 +165,9 @@ What other designs have been considered? What is the impact of not doing this?
 
 
 
+
+---
+
+Resources:
+- rust/src/libcollections/dlist.rs - double linked list implementation
 
