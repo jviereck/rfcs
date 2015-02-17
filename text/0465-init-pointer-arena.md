@@ -49,7 +49,7 @@ Let's assume for now, the two references `a_ref` and `b_ref` are from a special 
 
 ## Using TypedArenas to create |&init T| references
 
-Creating objects with the same lifetime is already possible in rust by using (Typed)Arenas. E.g. the references `a_ref` and `b_ref` have the same lifetime in the following example:
+Creating objects with the same lifetime is already possible in rust by using [(Typed)Arenas](http://doc.rust-lang.org/arena/struct.Arena.html). E.g. the references `a_ref` and `b_ref` have the same lifetime in the following example:
 
 ``` rust
 extern crate arena;
@@ -103,11 +103,11 @@ To make the above example work, the lifetime of the `&init T` and the `&Node` re
 
 The deallocation of objects created from `arena::alloc_init` follow the normal deallocation strategy of the arena: When the lifetime of the arena ends, all allocated objects (including the ones from the `alloc_init(...)` call) are deallocated before the arena object itself gets deallocated.
 
-QUESTION: What should the lifetime of the `a_normal_ref` on line (8) be? In principle, it is possible to define the lifetime to equal the one of the assigned `&init T` reference or should it follow more the normal rules when borrowing a reference in rust, such that the lifetime of the reference should start from the assignment and end at the end of the current block?
+**QUESTION:** What should the lifetime of the `a_normal_ref` on line (8) be? In principle, it is possible to define the lifetime to equal the one of the assigned `&init T` reference or should it follow more the normal rules when borrowing a reference in rust, such that the lifetime of the reference should start from the assignment and end at the end of the current block?
 
-QUESTION: Is it possible to use `&init T` references inside of structs for fields? I (aka. jviereck) arguess this should be disallowed as the `&init T` references only make sense during an initialisation phase.
+**QUESTION:** Is it possible to use `&init T` references inside of structs for fields? I (aka. jviereck) arguess this should be disallowed as the `&init T` references only make sense during an initialisation phase.
 
-## Semantics of the `&init T` pointers
+## Semantics of the `&init T` reference
 
 In contrast to the previous sections, the following struct definitions for `Nodes` and `Leaf` are used throughout this section:
 
@@ -158,7 +158,9 @@ The `&init T` point is similar to the `&mut T` pointer, as it allows mutation of
 
 ### Reading a field from an `&init T` reference:
 
-- Reading any reference field `& T` or `&mut T` from an `&init T` reference yields a very weak `&init? T` type. The `&init? T` type behaves like a `& T` type but prevents sharing to different threads (as the assigned value might be of type `&init T` which is not allowed to be shared). (QUESTION: Is it required to restrict the `&init? T` type further by e.g. disallow field reads?)
+- Reading any reference field `& T` or `&mut T` from an `&init T` reference yields a very weak `&init? T` type. The `&init? T` type behaves like a `& T` type but prevents sharing to different threads (as the assigned value might be of type `&init T` which is not allowed to be shared).
+
+- **QUESTION:** Is it required to restrict the `&init? T` type further by e.g. disallow field reads?
 
 
 ### Updating a field from an `&init T` reference:
@@ -177,7 +179,7 @@ The `&init T` point is similar to the `&mut T` pointer, as it allows mutation of
     a_ref_init.leaf = leaf_ref_init; // This works.
 ```
 
-QUESTION: Is it a problem, that reading an `&mut T` reference yields an `&init? T` reference, which can be assigned to an `& T` field reference?
+**QUESTION:** Is it a problem, that reading an `&mut T` reference yields an `&init? T` reference, which can be assigned to an `& T` field reference?
 
 ### Using `&init T` references for function argument types
 
@@ -193,7 +195,7 @@ In short, passing an `&init T` reference to a function as argument is not allowe
 
 - The `&init T` references can only be created from arenas which is different to the normal allocation strategy in rust.
 
-- The `&init T` reference is incompatible with the existing `& T` and `&mut T` pointers. This causes troubles, e.g. when passing an `&init T` reference to existing functions that expect an `& T` or `&mut T` reference. In fact, the current RFC disallow passing an `&init T` pointer as an argument to any function at all.
+- The `&init T` reference is incompatible with the existing `& T` and `&mut T` references. This causes troubles, e.g. when passing an `&init T` reference to existing functions that expect an `& T` or `&mut T` reference. In fact, the current RFC disallow passing an `&init T` pointer as an argument to any function at all.
 
 - While this RFC allows to build a double linked list, this list must become immutable before elements of the list can be shared to other threads. This is in contrast to the double linked list implementation available in the rust standard library, which allows the mutation of the double linked list even though it contained elements are shared to other threads.
 
