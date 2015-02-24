@@ -147,6 +147,7 @@ However, this definition causes problems in the following example on line (12). 
   }
   final_head_ref = &head_ref;
 }
+```
 
 
 Beside the already discussed `&init T` reference we will introduce another `&init? T` reference later for certain kind of field reads on an `&init T` reference. The lifetime of the `&init? T` is the same reading e.g. a `&T` in rust.
