@@ -8,26 +8,26 @@
 
 Add two new pointer reference types `&init T` and `&init? T`, which allow
 
-- to create object structures with multiple references to the same object (e.g. for linked lists, trees with back pointers to their parents)
-- to have multiple mutable references to an object during a so call "initialization phase"
+- to create immutable object structures with multiple references to the same object (e.g. for linked lists, trees with back pointers to their parents), without runtime checks
+- to have multiple mutable references to an object during a so-called "initialization phase"
 - to fall back to the existing type system after the "initialization phase", at which point the references become immutable (`&init T` becomes then `&T`)
 
 # Motivation
 
 > Why are we doing this? What use cases does it support? What is the expected outcome?
 
-Currently, Rust has two basic reference pointer types `&mut T` as well as `&T`. The first one allows to mutate the target object and the invariant holds, that there can be only one mutable reference to the same object at a time. In the case of `&T` there can be multiple references to the same object, but these references do not allow mutation of the target object. These invariants on the reference pointers ensure the desired security features in Rust of memory safety and prevent data races in parallel settings. However, these invariants are also preventing the construction of object structures that contain a reference cycle. Examples for such object structures are linked lists data structures and tress with back pointers to their parents.
+Currently, Rust has two basic reference pointer types `&mut T` as well as `&T`. The first one allows to mutate the target object and the invariant holds that there can be only one mutable reference to the same object at a time. In the case of `&T` there can be multiple references to the same object, but these references do not allow mutation of the target object. These invariants on the reference pointers ensure the desired security features in Rust of memory safety and prevent data races in parallel settings. However, these invariants also prevent the construction of object structures that contain a reference cycle. Examples of such object structures are linked list data structures and tress with back-pointers to their parents.
 
-The Rust standard library provides an implementation for a linked list, which uses `unsafe` blocks internally. To support a tree structure with back pointers to the parent node, reference counted objects `Rc` and `RefCell`s can be used (for an example on this, see the example in the [std:rc](http://doc.rust-lang.org/std/rc/index.html)), which requires dynamic runtime checks. Both, the use of `unsafe` blocks and dynamic runtime checks are indications of limitations of the existing type system in Rust. This RFC attempts to work around these limitations by making the type system more flexible during the initialization / construction of object structures.
+The Rust standard library provides an implementation for a linked list, which uses `unsafe` blocks internally. To support a tree structure with back pointers to the parent node, reference counted objects `Rc` and `RefCell`s can be used (for an example of this, see the example in the [std:rc](http://doc.rust-lang.org/std/rc/index.html)), which requires dynamic runtime checks. Both, the use of `unsafe` blocks and dynamic runtime checks are indications of limitations of the existing type system in Rust. This RFC attempts to work around these limitations by making the type system more flexible during the initialization / construction of object structures.
 
 Note: This RFC does not enable the full ability of the current linked list or `Rc` and `RefCell` combo available in Rust. While the creation of the object structure is (hopefully) possible with the ideas outlined in this RFC, the resulting object structure has either to become immutable to allow sharing of the involved objects eventually or allows mutation but then not sharing of the involved objects to other tasks.
 
 
 # Detailed design
 
-## Analysing what prevents cyclic references in rust
+## The idea : temporary initialisation for cyclic dependencies
 
-For demonstration, let's look at the following code example:
+Let's consider first what prevents the creation of cyclic reference structures in the current type system. Consider the following code example:
 
 ``` rust
 struct Node<'a> {
@@ -40,12 +40,22 @@ struct Node<'a> {
 
     a_ref.next = Some(b_ref); // (1)
     b_ref.next = Some(a_ref); // (2)
+    
+    // .. more code which uses the data structure
 }
 ```
 
-Initialising the above example in rust is not possible because of two reasons: first a borrowed reference makes the original reference immutable and second because of the conflicting object's lifetime. On line (1) a borrowed pointer is taken from the `b_ref` pointer, which makes the `b_ref` pointer immutable as long as the `a_ref` reference is alive. As the lifetime of `a_ref` extends to the end of the block, `b_ref` is still borrowed and as it is therefore also immutable the assignment in (2) is prevented.
+Initialising the above example in rust is not possible for two reasons: first a borrowed reference makes the original reference immutable and second because of the conflicting object's lifetime. On line (1), a borrowed pointer is taken from the `b_ref` pointer, which makes the `b_ref` pointer immutable so long as the `a_ref` reference is alive. As the lifetime of `a_ref` extends to the end of the block, `b_ref` is still borrowed and as it is therefore also immutable the assignment in (2) is prevented.
 
-Let's assume for now, the two references `a_ref` and `b_ref` are from a new pointer type that we call `&init T` (similar to `&T` and `&mut T`), which allows to take multiple borrows from an reference and still permits mutation. Even then the above example is rejected by the rust type checker, as the used objects lifetime's conflict. The reference `a_ref` has a larger lifetime as the `b_ref` one. As rust requires the lifetime of field references to be larger than the ones of the object itself, the assignment at (1) is not possible. In fact, the lifetime analysis in rust requires references, that are part of a reference cycle, to either have the same lifetime or rely on weak references (which in turn require runtime checks again).
+The key idea we propose is that it is OK to allow a temporary relaxation of the borrowing rules, effectively allowing multiple mutable borrows in order to set up such structures, so long as: 
+  (a) during this relaxed phase, the borrowed references cannot escape the current thread (as this could lead to race conditions).
+  (b) after this relaxed phase, the borrowed references revert to types which are handled by the current type system (with which the resulting heap structure must still be compatible).
+
+More concretely, we introduce a new pointer type that we call `&init T`, with which a second kind of lifetime is associated: its `init-time`. Rather than specifying when the reference will be deallocated (we will explain later how this is handled), a reference's init-time defines the duration of its init status, during which the relaxed borrow rules can be exploited.
+
+An owning `T` reference can be converted to an `&init T` reference, whose associated init-time can be any scope, as usual for rust lifetimes. At the end of this scope, the reference implicitly changes type to an `&T` (immutably borrowed) type. In the example above, we would use an additional scope around the lines (1) and (2); our relaxed rules for borrowing will allow these assignments to type-check. We will explain the detailed rules in the rest of this document. Observe that initialising such structures is only part of the problem; once we create a cyclic dependency between these two references, we also need to be sure that they can be deallocated safely, avoiding dangling pointers. The current type system would force these references to have identical lifetimes.  In fact, the lifetime analysis in rust requires references that are part of a reference cycle, to either have the same lifetime or rely on weak references (which in turn require runtime checks again).
+
+Question (for Julian): I don't see now why the two references in our example have different lifetimes (sorry, I think we discussed this) - don't they both expire at the end of the scope?
 
 ## Using TypedArenas to create |&init T| references
 
