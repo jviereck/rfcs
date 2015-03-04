@@ -35,19 +35,24 @@ struct Node<'a> {
 }
 
 {
-    let a_ref = &mut Node({ next: None })
-    let b_ref = &mut Node({ next: None })
+  let mut a = Node({ next: None })
+  let mut b = Node({ next: None })
 
-    a_ref.next = Some(b_ref); // (1)
-    b_ref.next = Some(a_ref); // (2)
-    
-    // .. more code which uses the data structure
+  {
+      let a_ref = &mut a;
+      let b_ref = &mut b;
+
+      a_ref.next = Some(b_ref); // (1)
+      b_ref.next = Some(a_ref); // (2)
+
+      // ... More code which uses the data structure.
+  }
 }
 ```
 
 Initialising the above example in rust is not possible for two reasons: first a borrowed reference makes the original reference immutable and second because of the conflicting object's lifetime. On line (1), a borrowed pointer is taken from the `b_ref` pointer, which makes the `b_ref` pointer immutable so long as the `a_ref` reference is alive. As the lifetime of `a_ref` extends to the end of the block, `b_ref` is still borrowed and as it is therefore also immutable the assignment in (2) is prevented.
 
-The key idea we propose is that it is OK to allow a temporary relaxation of the borrowing rules, effectively allowing multiple mutable borrows in order to set up such structures, so long as: 
+The key idea we propose is that it is OK to allow a temporary relaxation of the borrowing rules, effectively allowing multiple mutable borrows in order to set up such structures, so long as:
   (a) during this relaxed phase, the borrowed references cannot escape the current thread (as this could lead to race conditions).
   (b) after this relaxed phase, the borrowed references revert to types which are handled by the current type system (with which the resulting heap structure must still be compatible).
 
@@ -55,11 +60,9 @@ More concretely, we introduce a new pointer type that we call `&init T`, with wh
 
 An owning `T` reference can be converted to an `&init T` reference, whose associated init-time can be any scope, as usual for rust lifetimes. At the end of this scope, the reference implicitly changes type to an `&T` (immutably borrowed) type. In the example above, we would use an additional scope around the lines (1) and (2); our relaxed rules for borrowing will allow these assignments to type-check. We will explain the detailed rules in the rest of this document. Observe that initialising such structures is only part of the problem; once we create a cyclic dependency between these two references, we also need to be sure that they can be deallocated safely, avoiding dangling pointers. The current type system would force these references to have identical lifetimes.  In fact, the lifetime analysis in rust requires references that are part of a reference cycle, to either have the same lifetime or rely on weak references (which in turn require runtime checks again).
 
-Question (for Julian): I don't see now why the two references in our example have different lifetimes (sorry, I think we discussed this) - don't they both expire at the end of the scope?
-
 ## Using TypedArenas to create |&init T| references
 
-To fix one of the probem outlined in the last paragraph about the conflicting lifetimes of two references, we make use of the [(Typed)Arenas](http://doc.rust-lang.org/arena/struct.Arena.html) provided by the rust standard library. Using a (Typed)Arena it is possible to create multiple objects with identical lifetime as the arena they were created from. E.g. the references `a_ref` and `b_ref` have the same lifetime in the following example:
+To fix one of the probem outlined in the last paragraph about the conflicting lifetimes of two references, we make use of the [(Typed)Arenas](http://doc.rust-lang.org/arena/struct.Arena.html) provided by the rust standard library. Using a (Typed)Arena it is possible to create multiple objects with identical lifetimes to the arena they were created from. E.g. the references `a_ref` and `b_ref` have the same lifetime in the following example:
 
 ``` rust
 extern crate arena;
@@ -104,9 +107,55 @@ fn main() {
 } // (10)
 ```
 
+``` rust
+// Reuse
+fn setup_cycle<'a>(arena: &'a mut TypedArena<Node>, nodeA: Node, nodeB: Node): &'a Node
+{
+  let a_ref : &init Node = arena.alloc_init(nodeA); // (5)
+  let b_ref : &init Node = arena.alloc_init(nodeB);
+
+  a_ref.next = Some(b_ref); // (6)
+  b_ref.next = Some(a_ref);
+
+  return a_ref;
+}
+
+fn main() {
+  let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
+  let ref = setup_cycle(arena);
+}
+
+
+  // Create a cycle between i `Node`s
+  fn setup_cycle<'a>(arena: &'a mut TypedArena<Node>, size: isize): &'a Node
+  {
+    let head_ref: &init Node = arena.alloc_init(Node { next: None });
+    let prev_ref: &init Node = head_ref;
+    let tmp_ref: &init Node = head_ref;
+
+    for x in 1..size {
+      tmp_ref = arena.alloc_init(Node { next: None });
+      prev_ref.next = Some(tmp_ref);
+      prev_ref = tmp_ref;
+    }
+
+    prev_ref.next = Some(head_ref);
+
+    return head_ref;
+  }
+
+  fn main() {
+    let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
+    let head: &Node = setup_cycle(arena);
+
+    // More operations on the ring_head here.
+  }
+```
+
+
 In short, the `&init T` pointers are mutable, there can be multiple mutable borrows to the same referenced object, sharing a `&init T` reference to a different thread is not possible and there are further restrictions on the pointer when it comes to object field read and writes. The detailed semantics of the new `&init T` reference will be discussed in the next section.
 
-## Definition of "initialisation phase" and lifetime of "&init T" and "&init? T" references
+## Definition of `init-time` and lifetime of `&init T` and `&init? T` references
 
 To make these new pointers work with the existing type system, the idea is to build up the data structures with cyclic references during what we call "initialisation phase" (therefore we call the pointers `&init T` pointers) and after the initialization of the data structures it is possible to get hold of an immutable reference pointer `&T` of the data structure. This can be done by assigning an `&init T` reference to an `&T` reference after the initialisation phase as shown on line (8). This assignment is only permitted when the initialisation phase of the `&init T` pointer has already ended.
 
@@ -255,6 +304,8 @@ In short, passing an `&init T` reference to a function as argument is not allowe
 - Defining the type of a function argument as `&init T` causes trouble with the existing type system and is therefore not allowed: At this point rust has annotations for the lifetime of the passed in argument reference, however, recall that the `&init T` have not only a lifetime but also an initialisation phase. One could come up with a new notation for the initialisation phase (e.g. similar to the lifetime annotation `'a' along the lines of `''a`) but to keep this RFC simple, adding such an initialisation phase annotation is part of future work. The same argument holds for the `&init? T` reference type.
 
 # Drawbacks
+
+- Need an entire function to craete `&init T`. Would love to have smaller scopes local to a function.
 
 - The `&init T` references become immutable when assigning to `&T` references later on. In contrast the already available `RefCells` are more powerful in rust, as they allow the mutation of objects participating in an reference cycle at the cost of dynamic runtime checks.
 
