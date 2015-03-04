@@ -77,5 +77,123 @@ AND WANT TO GET FREE RUST STICKERS!
 
 ## Problem with cycle of object to itself.
 
+Consider the following rust program
+
+``` rust
+struct Node<'a> {
+    next: Option<&'a mut Node<'a>>
+}
+
+fn main() {
+    let mut a = Node { next: None };
+    a.next = Some(&mut a /* (2) */); // (1)
+}
+```
+
+The program is rejected by the rust compiler because the `a` is borrowed at
+(2) on line (1) when a mutable refernece is taken from `a`. As `a` is borrowed
+at this point, the value `a` becomes immutable and in particular the update
+to `a.next` is no longer possible.
+
+From a memory safety point of view, the above assignment should be possible.
+However it is not possible at the moment in rust because there can only be one
+mutable borrow to the same reference at the same time. Let's fix this by extending
+references to a group of references. To distinquish these reference groups we
+introduce a new annotation that we call "color" at the end of the `&mut` reference.
+The precise definitions for "group references" and "color" will follow in just
+a moment, but let's first take a look at the above example rewritten with the
+new syntax:
+
+``` rust
+struct Node<'a> {
+    id: isize,
+    next: Option<&'a mut Node<'a>>
+}
+
+fn main() {
+    let mut a = Node { id: 0, next: None };      // (3)
+
+    {
+        let a_ref  /*: &mut    Node */ = &mut a; // (4)
+        let a_ref0   : &mut[c] Node    = a_ref;  // (5)
+        let a_ref1 /*: &mut[c] Node */ = a_ref0; // (6)
+        a_ref0.next = Some(a_ref1);
+    }
+}
+```
+
+Note that the type explict type annotation on (5) is necessary and the one on
+(4), (6) is only for documentation purpose (and therefore commented out).
+
+We introduce and name the synatx introduced in the last example and then explain
+the semantics. As a new property of a mutable reference we introduce the concept
+of a color set, which is annotated in square brackets behind the `&mut` definition.
+If no color specified, then the color set of the reference is empty and is written
+either by `&mut[]` or by the currently used `&mut` syntax. In the above example
+the reference for `a_ref0` and `a_ref1` have the reference type `&mut[c]` and
+therefore the color set is made up of the single color `c`. As most of the times
+the color set will contain only one color entry, we will use the term color in
+the following as a placeholder for color set and say "a reference has no color"
+to indicate that the color set of a reference is empty. A color set with multiple
+colors is denoted as `&mut[c,d]`, where where the set contains the two colors `c`
+and `d`. As for the color names the only restriction is to not use the same labels
+as used for lifetimes to avoid confusion.
+
+All references with the same non-empty color belong to exactly one group of
+references that we call "reference group". For symmetric purpose we can also
+associate a reference group to every reference not having a color. For this,
+we introduce a new unique property "id" for each created reference. Though these
+ids are never written out in the program (as they are a latent concept) we make
+use of the convention to use numbers for them and write them at the places where
+the colors are expected. E.g. if we think the reference created on line (4) has
+the id of `0` we can write the `&mut` more precisely as `&mut[0]`. With this
+definitions, we can say, that a reference blongs to the "reference group" that
+is either induced by the color set of the reference in case it is non-empty or
+if the color set of the reference is empty, then the reference belongs to the
+reference group induced by the reference id. From this definition it is clear,
+that a colorless reference belongs is the only member of the reference group it
+belongs to (given that the reference ids are unique).
+
+
+
+
+
+Given these definitions, the above can also be rewritten in a shorter way as:
+
+``` rust
+struct Node<'a> {
+    id: isize,
+    next: Option<&'a mut Node<'a>>
+}
+
+fn main() {
+    let mut a = Node { id: 0, next: None };
+
+    {
+        let a_ref : &mut[c] Node = &mut a;
+        a_ref.next = Some(a_ref);
+    }
+
+    // Can update the `a` reference here again.
+    a.id = 1;
+    println!("a.id={}", a.id);
+}
+```
+
+
+
+NEED TO SPECIFY:
+- If a reference has a color, then all the references on the struct inherit
+  this color. E.g. the type of the following is `(&mut[c] Node).next : Option<&mut[c] Node>`
+
+
+
+
+
+
+
+
+
+
 
 
