@@ -84,57 +84,69 @@ fn main() {
 }
 ```
 
-To get around the problem with borrowed reference being immutable and therefore preventing the construction of reference cycles, we propose a new method on the arenas `.alloc_init` that returns a new type of reference pointer that we call `&init T`. The above example changes then to:
+To get around the problem with borrowed reference being immutable and therefore preventing the construction of reference cycles, we propose a new method on the arenas `.alloc_init` that returns a new type of reference pointer that we call `&init T`. The complete signature of this function reads shown in the following, where the lifetime is added in explicit for clearity:
+
+```rust
+fn alloc_init<'a>(&'a self, object: T) -> &'a init T
+```
+
+The above example changes then to:
 
 ``` rust
-// Reuse same struct definition as before.
+extern crate arena;
+
+use arena::TypedArena;
+
+struct Node<'a> {
+    next: Option<&'a Node<'a>>
+}
+
+fn setup_cycle<'a>(arena: &'a TypedArena<Node>) -> &'a Node<'a>
+{
+    // Create two nodes of refernece type `&init`.
+    let a_ref : &init Node = arena.alloc_init(Node { next: None }); // (5)
+    let b_ref : &init Node = arena.alloc_init(Node { next: None });
+
+    // Setup the cycle.
+    a_ref.next = Some(b_ref); // (6)
+    b_ref.next = Some(a_ref);
+
+    // Return one of the `&init` referneces. Similar to returning an `&mut T`
+    // reference, this converst the `&init T` refernece to an `&T` reference
+    // while inheriting the lifetime of the original `&init T` refernece.
+    //
+    // SEE: https://bitbucket.org/j4c/eth-rust-cycles/src/9d8e1e0/20150317/arena_immut_return.rs
+    //
+    return a_ref; // (7)
+}
 
 fn main() {
     let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
+    let ref : &Node = setup_cycle(arena); // (8)
 
-    {
-        let a_ref : &init Node = arena.alloc_init(Node { next: None }); // (5)
-        let b_ref : &init Node = arena.alloc_init(Node { next: None });
-
-        a_ref.next = Some(b_ref); // (6)
-        b_ref.next = Some(a_ref);
-    } // (7)
-
-    {
-      let a_normal_ref : &Node = a_ref; // (8)
-      ...
-    } // (9)
-} // (10)
-```
-
-``` rust
-// Reuse
-fn setup_cycle<'a>(arena: &'a TypedArena<Node>, nodeA: Node, nodeB: Node): &'a Node
-{
-  let a_ref : &init Node = arena.alloc_init(nodeA); // (5)
-  let b_ref : &init Node = arena.alloc_init(nodeB);
-
-  a_ref.next = Some(b_ref); // (6)
-  b_ref.next = Some(a_ref);
-
-  return a_ref;
-}
-
-fn main() {
-  let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
-  let ref = setup_cycle(arena);
+    // Can use the `ref` now as any normal immutable reference.
+    ...
 }
 ```
 
+Note that the type annotations on line (5) and (8) are optional and only added here for
+clearity.
+
+In short, the `&init T` pointers are mutable, there can be multiple mutable borrows to the same referenced object, sharing a `&init T` reference to a different thread is not possible and there are further restrictions on the pointer when it comes to object field read and writes. The detailed semantics of the new `&init T` reference will be discussed in the next section. The conversion from an `&init T` reference to an `&T` reference happens at the return point of a function.
+
+As an appetizer for a more complex example, here is how to setup a ring structure of size `i` using `&init T` types:
+
 ``` rust
-// Create a cycle between i `Node`s
-fn setup_cycle<'a>(arena: &'a TypedArena<Node>, size: isize): &'a Node
+// Reusing external, use and struct definitions from last example above.
+
+// Create a ring structure with i nodes.
+fn setup_ring<'a>(arena: &'a TypedArena<Node>, ring_size: isize): &'a Node
 {
   let head_ref: &init Node = arena.alloc_init(Node { next: None });
   let prev_ref: &init Node = head_ref;
   let tmp_ref: &init Node = head_ref;
 
-  for x in 1..size {
+  for x in 1..ring_size {
     tmp_ref = arena.alloc_init(Node { next: None });
     prev_ref.next = Some(tmp_ref);
     prev_ref = tmp_ref;
@@ -147,74 +159,76 @@ fn setup_cycle<'a>(arena: &'a TypedArena<Node>, size: isize): &'a Node
 
 fn main() {
   let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
-  let head: &Node = setup_cycle(arena);
+  let head: &Node = setup_ring(arena);
 
   // More operations on the ring_head here.
 }
 ```
 
-
-In short, the `&init T` pointers are mutable, there can be multiple mutable borrows to the same referenced object, sharing a `&init T` reference to a different thread is not possible and there are further restrictions on the pointer when it comes to object field read and writes. The detailed semantics of the new `&init T` reference will be discussed in the next section.
-
 ## Definition of `init-time` and lifetime of `&init T` and `&init? T` references
 
-To make these new pointers work with the existing type system, the idea is to build up the data structures with cyclic references during what we call "initialisation phase" (therefore we call the pointers `&init T` pointers) and after the initialization of the data structures it is possible to get hold of an immutable reference pointer `&T` of the data structure. This can be done by assigning an `&init T` reference to an `&T` reference after the initialisation phase as shown on line (8). This assignment is only permitted when the initialisation phase of the `&init T` pointer has already ended.
+To make these new pointers work with the existing type system, the idea is to build up the data structures with cyclic references during what we call "initialisation phase" (therefore we call the pointers `&init T` pointers) and after the initialization of the data structures it is possible to get hold of an immutable reference pointer `&T` of the data structure. The conversion from an `&init T` to an `&T` happens at the return statement of a function as shown on line (7) in above example.
 
-To make the above example work, the lifetime of the `&init T` and the `&Node` reference on line (8) are different than normally defined in rust. The lifetime of an `&init T` reference is defined to equal the one from its allocated arena. In the example above, the lifetime of `a_ref` does not end at line (7) but extends to the end of the `fn main()` body at line (10). This adjustment is necessary as a `&init T` reference can be assigned to an `&T` reference after the initialisation phase has finished and all the objects stored on the `&init T` object must have a long enough lifetime. All the objects on the `&init T` reference will have a large enough lifetime as in rust a reference stored on an object must have at least the same lifetime as the object itself. Defining the lifetime in this way is possible as objects allocated from an arena are deallocated together with the arena object itself. The lifetime of an `&T` reference assigned to from an `&init T` follows the normal lifetime definition in rust, e.g. the lifetime of the `a_normal_ref` starts at line (8) and ends (9).
-
-The "initialisation phase" of an `&init T` reference equals in the simple case the normal lifetime of a reference in rust. As an example, the "initialisation phase" of `a_ref` starts at line (5) and expands to line (7).
-
-However, this definition causes problems in the following example on line (12). To work around this issue, the initialisation phase of an `&init T` reference gets extended to be at least as large as all possible assigned `&init T` references to it. With this, the initialisation phase of `c_ref` gets extended to the one of `a_ref` due to the assignment on line (11) which then makes the assignment on line (12) invalid.
-
-``` rust
-{
-    let a_ref : &init Node = arena.alloc_init(Node { next: None });
-
-    {
-        let c_ref : &init Node = arena.alloc_init(Node { next: None });
-        c_ref.next = a_ref; // (11)
-    }
-
-    let c_normal_ref : &Node = &c_ref; // (12)
-    // Share `b_normal_ref` to different thread although reachable `a_ref` is
-    // still in the initialisation phase and might be modified.
-}
-```
-
-**PROBLEM:** The above additional rule does not solve the problem completly as the `c_ref` instance can be aliased :/ A possible solution is to make the initialisation phase a property of the arena itself but this makes traking the beginning and the end of the initialisation phase really hard. E.g. if the arena is passed as argument to a function, how to ensure statically, that there is no new call to `arena.alloc_init`, which requires the initialisation phase to be extended? Other ideas:
-- Similar to the free and committed type system, can we restrict the construction of `&init T` types to be local to a function and the conversion to an `&T` type happens when the function returns?
-- THIS SHOULD WORK: Restrict the assignment to the fields of an `&init T` type: The assignment is only valid if the initialisation phase end of the passed in `&init T` is smaller or equal to the one of the target `&init T`. This prevents the assignment on line (11). As the normal lifetime of a reference is determined in rust by the location of the `let ...` definition, the developer is able to ensure the initialisation phase is of the right length even if e.g. the call to `arena.alloc_init(Node { next: None });` is done from inside of a for loop:
-
-``` rust
-// The following is pseudo code and I guess not really valid rust yet.
-// Create a ring buffer with 10 elements.
-{
-  let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
-  let final_head_ref: &Node;
-
-  {
-    let head_ref: &init Node = arena.alloc_init(Node { next: None });
-    let prev_ref: &init Node = head_ref;
-    let tmp_ref: &init Node = head_ref;
-
-    for x in 0..10 {
-      tmp_ref = arena.alloc_init(Node { next: None });
-      prev_ref.next = Some(tmp_ref);
-      prev_ref = tmp_ref;
-    }
-
-    prev_ref.next = Some(head_ref);
-  }
-  final_head_ref = &head_ref;
-}
-```
-
+Similar to the lifetime of an object in rust we denote the point earliest possible point at which a `&init T` can be converted to an `&T` the "init time" of the allocated object from the typed arena. We are speaking of earliest possible point here as there might be multiple return statements in a function and in this case the earliest in term of code-line should be used. This init time playes an important role when passing the `&init T` reference to other functions and then storing the references on other references fields. Where the lifetime of an reference ensures the reference is only stored on a field if the passed in reference lives long enough (and therefore prevents freed-memory-access issues), the init time is used to prevent storing an `&init T` reference on anothers `&init T` reference's field, where the reciever object might be converted to an `&T` reference before the target object is. TODO(jviereck): Add an example here to make this paragraph more clear. ALSO: Not sure if it makes sense to talk about the init time here when it turns out it is not that much of an requirement in this RFC anyway :/ Maybe discuss it later when discussing why the `&init T` reference cannot be passed to functions?
 
 Beside the already discussed `&init T` reference we will introduce another `&init? T` reference later for certain kind of field reads on an `&init T` reference. The lifetime of the `&init? T` is the same reading e.g. a `&T` in rust.
 
 The deallocation of objects created from `arena::alloc_init` follow the normal deallocation strategy of the arena: When the lifetime of the arena ends, all allocated objects (including the ones from the `alloc_init(...)` call) are deallocated before the arena object itself gets deallocated.
 
 The `&init T` reference type cannot be used for struct fields. That is, as an `&init T` reference is only alive during the initialisation phase and this RFC does not define new syntax to annotate the initialisation phase to keep this RFC simple. The same argument holds for the `&init? T` reference type.
+
+
+NOTE(jviereck): In the previous version of this RFC we talked about adjusting the lifetime of the `&init T` reference. However, this is not required AFAIKT. When drafting the last iteration of the RFC I was not aware how exactly the lifetimes work and how they are assigned but given my better understanding now I am pretty certain no special rules for the `&init T` references must be imposed. To make checking the previous draft easier, I keep it as quote in the following:
+
+> (THE FOLLOWING should be outdated as described in the comment preampting this quote.) To make the above example work, the lifetime of the `&init T` and the `&Node` reference on line (8) are different than normally defined in rust. The lifetime of an `&init T` reference is defined to equal the one from its allocated arena. In the example above, the lifetime of `a_ref` does not end at line (7) but extends to the end of the `fn main()` body at line (10). This adjustment is necessary as a `&init T` reference can be assigned to an `&T` reference after the initialisation phase has finished and all the objects stored on the `&init T` object must have a long enough lifetime. All the objects on the `&init T` reference will have a large enough lifetime as in rust a reference stored on an object must have at least the same lifetime as the object itself. Defining the lifetime in this way is possible as objects allocated from an arena are deallocated together with the arena object itself. The lifetime of an `&T` reference assigned to from an `&init T` follows the normal lifetime definition in rust, e.g. the lifetime of the `a_normal_ref` starts at line (8) and ends (9).
+>
+> The "initialisation phase" of an `&init T` reference equals in the simple case the normal lifetime of a reference in rust. As an example, the "initialisation phase" of `a_ref` starts at line (5) and expands to line (7).
+>
+> However, this definition causes problems in the following example on line (12). To work around this issue, the initialisation phase of an `&init T` reference gets extended to be at least as large as all possible assigned `&init T` references to it. With this, the initialisation phase of `c_ref` gets extended to the one of `a_ref` due to the assignment on line (11) which then makes the assignment on line (12) invalid.
+>
+> ``` rust
+> {
+>     let a_ref : &init Node = arena.alloc_init(Node { next: None });
+>
+>     {
+>         let c_ref : &init Node = arena.alloc_init(Node { next: None });
+>         c_ref.next = a_ref; // (11)
+>     }
+>
+>     let c_normal_ref : &Node = &c_ref; // (12)
+>     // Share `b_normal_ref` to different thread although reachable `a_ref` is
+>     // still in the initialisation phase and might be modified.
+> }
+> ```
+>
+> **PROBLEM:** The above additional rule does not solve the problem completly as the `c_ref` instance can be aliased > :/ A possible solution is to make the initialisation phase a property of the arena itself but this makes traking the > beginning and the end of the initialisation phase really hard. E.g. if the arena is passed as argument to a > function, how to ensure statically, that there is no new call to `arena.alloc_init`, which requires the > initialisation phase to be extended? Other ideas:
+> - Similar to the free and committed type system, can we restrict the construction of `&init T` types to be local to > a function and the conversion to an `&T` type happens when the function returns?
+> - THIS SHOULD WORK: Restrict the assignment to the fields of an `&init T` type: The assignment is only valid if the > initialisation phase end of the passed in `&init T` is smaller or equal to the one of the target `&init T`. This > prevents the assignment on line (11). As the normal lifetime of a reference is determined in rust by the location of > the `let ...` definition, the developer is able to ensure the initialisation phase is of the right length even if e.> g. the call to `arena.alloc_init(Node { next: None });` is done from inside of a for loop:
+>
+> ``` rust
+> // The following is pseudo code and I guess not really valid rust yet.
+> // Create a ring buffer with 10 elements.
+> {
+>   let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
+>   let final_head_ref: &Node;
+>
+>   {
+>     let head_ref: &init Node = arena.alloc_init(Node { next: None });
+>     let prev_ref: &init Node = head_ref;
+>     let tmp_ref: &init Node = head_ref;
+>
+>     for x in 0..10 {
+>       tmp_ref = arena.alloc_init(Node { next: None });
+>       prev_ref.next = Some(tmp_ref);
+>       prev_ref = tmp_ref;
+>     }
+>
+>     prev_ref.next = Some(head_ref);
+>   }
+>   final_head_ref = &head_ref;
+> }
+> ```
+
 
 ## Semantics of the `&init T` reference
 
@@ -227,6 +241,7 @@ struct Leaf {
 
 struct Node<'a> {
     next: Option<&'a Node<'a>>,
+
     // In addition to before, the node also has an immutable and mutable leaf
     // reference.
     leaf: &'a Leaf,
@@ -241,30 +256,143 @@ The `&init T` point is similar to the `&mut T` pointer, as it allows mutation of
 
 - The `&init T` references cannot be shared, meaning they cannot be passed to different threads.
 
-### Rules for borrowing:
+### Rules for borrowing of `&init T` reference
 
-- Creating multiple `&int T` references from the same `&init T` reference is possible and doesn't change any of the `&init T` properties. Especially, the lifetime and the initialisation phase of the new obtained `&init T` reference are the same as the one borrowed from. Keeping the initialisation phase fixed is important, as otherwise it is possible to get hold of an `&T` reference as the initialisation phase of the new `&init T` reference has ended while the original `&init T` reference is still mutable (as its initialisation phase has not ended yet).
+- Creating multiple `&int T` references from the same `&init T` reference pointing to the same object is possible and doesn't change any of the `&init T` properties. Similar to the mutable and immutalbe borrow we speak about a new kind of borrowing called "init borrow". The lifetime and the initialisation phase of the new obtained `&init T` reference are the same as the one borrowed from.
 
 ``` rust
-    let a_ref_init : &init Node = ...
-    let another_a_ref_init : &init Node = a_ref_init; // This works.
+    let a_ref_init : &init Node = some_arena.alloc_init( Node { ... });
+
+    // Example of creating an "init borrow" from an `&init` refernece. Note that
+    // no special `&init` prefix is required on the RHS of the assignment. That
+    // means the default type inference for an assignment with the RHS being an
+    // `&init T` reference is to expect an `&init T` on the LHS as well.
+    let another_a_ref_init /*: &init Node */ = a_ref_init; // This works.
 ```
 
-- It is not possible to borrow a mutable or immutable reference from an `&init T` reference during the initialisation phase:
+NOTE(jviereck): In the last iteration of this RFC it was not possible to take a mutable or immutable borrow of an `&init T` reference. Not sure if this is such a problem anymore. For the immutable borrow it should not be be a problem at all. For the mutable borrow to get a `&mut T` from an `&init T` it depends on how the field assignments of the object are defined in the following. E.g. if it is possible to get hold on an `&mut T`, with
+
+``` rust
+struct T<'a> {
+  lhs: Option<&'a mut T<'a>>,
+  rhs: Option<&'a mut T<'a>>
+}
+```
+
+and it is possible to assign to the `lhs` and the `rhs` field the same object (via an `&init T` reference), than this is not sound, as it is possible to get hold of a mutable reference to the `lhs` and `rhs`, that rust treats as independent, though they end up at the same object, and therefore it is possible to e.g. share the `lhs` to a different thread while keeping an mutable reference to the same object via the `rhs` field.
+
+DECISION(jviereck): For now, let's allow taking an immutable borrow and disallow taking an mutable borrow.
+
+- Taking an immutable borrow from an `&init T` reference is possible and yields an `&T` reference. Same to the taking an immutable borrow from an `&mut T` reference it is possible to make multiple immutable borrows from an `&init T` that is already immutable borrowed once. Note that taking an immutable borrow from an `&init T` reference marks all `&init T` references in scope as immutable borrowed.
+
+QUESTION(jviereck): Does this only markes all references of the same type `T` as immutable borrowed or all `&init ?` from all possible types (denoted via `?` here) as immutable borrowed?
+
+QUESTION(jviereck): Previous iterations only allowed to take an immutable borrow after the initialisation phase has ended. Is this really a problem? I think it is not a problem, as taking an immutable borrow will cause all `&init T` references to be immutable borrowed for the lifetime of the borrow and therefore no updates to any of the `&init T` references can happen in the meantime. In addition, rust will complain if it is not able to enforce long enough lifetimes on the immutable borrow and will therefore prevent situations where the immutable borrow might not life long.
+
+``` rust
+// Attempt to creeat a counter example why taking an immutable borrow from an
+// `&init T` reference is not sound. The problem is due to the violation of the
+// init time on the `&init T` reference.
+// HOWEVER: Turns out, this is not a problem as the lifetime requirements for
+//          field assignments require the immutalbe borrow on the `&init T`
+//          to last long enough then.
+
+fn setup_b<'a>(arena: &'a TypedArena<Node>, node_for_field: &'a Node<'a>) -> &'a Node<'a>
+{
+    let a_ref_init : &init Node = arena.alloc_init(Node { next: None });
+
+    // Assign the passed in node reference on an immutable field of the just
+    // allocated node.
+    a_ref_init.some_immutable_field = node_for_field; // (1)
+
+    // Return
+    return a_ref_init;
+}
+
+fn setup_a<'a>(arena: &'a TypedArena<Node>) -> &'a Node<'a>
+{
+    let a_ref_init : &init Node = arena.alloc_init(Node { next: None });
+
+    {
+        // Taking an immutable borrow of the `a_ref_init` reference.
+        let a_ref /* : &'a Node<'a> */ = &a_ref_init;
+
+        // Call the second helper function which consumes the immutable borrowed
+        // reference of the `&init Node` allocated in this function.
+        let res /* : &'a Node<'a> */ = setup_b(arena, a_ref);
+    }
+
+    // At the first look, it might seem like there is an issuer here now. E.g.
+    // there is an immutable reference `res`, which can be shared to different
+    // threads and this object contains an `&init Node` which can be mutated here.
+    //
+    // TURNS OUT this is not a problem:
+    // To make the assignment on line (1) work, the lifetime of `node_for_field`
+    // must be at least as long as the one of the reciever object. This is the
+    // case given the lifetime annotations on the `setup_b` function. But exactly
+    // these lifetime constraints cause the `a_ref` refernece to be borrowed
+    // after the call to `setup_b` has ended (for the lifetime of `'a`), which
+    // in turn mean the `a_ref_init` is immutable borrowed when the following
+    // line is reached. Therefore, there is no problem due to the immutable borrow
+    // that prevents any updates to an `&init T` reference.
+
+    a_ref_init.id = 1; // Some mutable update on the Node struct.
+}
+```
+
+- Taking a mutable borrow from an `&init T` reference to get hold on an `&mut T` reference is not permitted. TODO(jviereck): Check in a later iteration of this RFC if the NOTE above still applies and this statement should stay or if taking an mutable borrow can be allowed.
 
 ```rust
     let a_ref_init : &init Node = ...
 
-    let a_ref : &Node = a_ref_init; // NOT allowed.
-    let a_ref_mut : &mut Node = a_ref_init; // NOT allowed.
+    let a_ref /*: &Node */ = &a_ref_init; // IS allowed.
+    let a_ref_mut /*: &mut Node */ = &mut a_ref_init; // IS NOT allowed.
 ```
 
-- It is possible to borrow an immutable `&T` reference from an `&init T` reference after the initialisatino phase of the `&init T` reference, e.g. as shown on line (8).
+## Moving and borrowing a value field from an `&init T` reference
 
-- Borrowing a `&T` or `&mut T` reference of a `T` field of an `&init T` reference is not allowed. The problem is, that a `&T` reference can be shared, while an `&init T` does not allow sharing. A `&mut T` is not allowed either, as it allows to create `&T` references from it, which can then be shared to other threads. However, it is possible to borrow a very weak `&init? T` type. The `&init? T` type behaves like a `&T` type but prevents sharing to different threads (as the assigned value might be of type `&init T` which is not allowed to be shared) and can only be borrowed to another `&init? T` refernece and not to an `&T` reference.
+This section discusses reading and borrowing of a filed like the `id` of an `&init Leaf` type.
+
+- As the only way to introduce new `&init T` reference into the system is for objects allocated from an arena via the call to `alloc_init` it should not be possible to get hold to a reference of a field via an `&init T` reference. Therefore, taking an init borrow from an value field `S` of an `&init T` reference is not allowed. (More on this point in the notes below.)
+
+- Taking an immutable or mutable borrow from a field `f` of type `S` of an `&init T` reference is possible. As with `&init T` references there can be multiple references to the same object it becomes hard to track which values are on which `&init T` references are affected by the borrow to the field `f`. Therefore, an immutable or mutable borrow of the field `f` on some `&init T` reference causes a partial borrow on all fiels `f` of all `&init T` references with exactly the type `T`.
+
+CONTINUE(jviereck): How exactly does partially moved works on a struct? Can this be a problem here?
+
+### NOTES on what's the problem with `&init S` for a value field of type `S` on a reference `&init T`
+
+Taking an init borrow from a value field of an `&init T` reference without any further restrictions is not possible. The problem is, that there could be another `&init Leaf` reference to the same object and updating the field with a new value causes the destructor of the first value to run.
+
+``` rust
+let a_init_0 = ...
+let a_init_1 = a_init_0;
+
+let some_ref /* : &init Box<Leaf> */ = &init a_init_0.some_boxed_value; // (1)
+let id_ref   /* : &isize */ = &some_ref.id; // (2)
+
+// Update the boxed value on the field of the `a` object.
+// This causes the destructor for the previous boxed leaf value to run and
+// the above `id_ref` becomes a dangeling pointer.
+//
+// HOWEVER: There is no problem here, as taking an immutable borrow on `some_ref`
+//   on line (2) causes all the `&init T` references to be immutable borrowed
+//   (see the rules borrowing of `&init T` references in the previous section)
+//   and therefore the update of the boxed value on the next line is not possible!
+a_init_0.some_boxed_value = box<Leaf { id: 42 }>
+```
+
+While there is not a problem in the last example per see, the line (1) exhibits
+a problem: This line introduces a `&init T` reference from a plain value type `T`.
+In general this (might) mean that for any `T` a `&init T` reference can be borrowed
+from, but this should not be the case, as the only way to get hold of an `&init T`
+should be from an typed arena. (This is in particular important as otherwise it is
+possible to do the following borrowings `T -> &init T -> T -> &mut T`, which cause
+problems.)
+
+Recall that in the current setup of rust it is possible to take a mutable reference to two distinct fields of the same mutable object and mutate them via mutable references.
 
 
-### Reading a field from an `&init T` reference:
+### Borrowing a field from an `&init T` reference:
 
 - In general, reading a field of an `&init T` reference is only allowed during the initialisation phase of the reference. To get hold of the data after the initialisation phase, the `&init T` reference can be assigned to an `&T` reference and then the normal rules for reading from an `&T` reference apply.
 
