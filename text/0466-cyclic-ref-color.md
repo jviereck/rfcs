@@ -188,11 +188,122 @@ NEED TO SPECIFY:
 
 
 
+## Outline for LinkedList
+
+The current rust's LinkedList implementation is documented here:
+http://doc.rust-lang.org/std/collections/struct.LinkedList.html
+
+In the following a discussion about how to use the new color referneces to get
+rid of the unsafe code in rust's LinkekdList implementation is outlined. While
+the implementation with reference colors (hopefully) has the same feature set /
+covers the full API of the current rust LinkedList implementation, there are two
+main downsides:
+
+1. Each LinkedList has an additional arena to spawn the internal node elements
+   for the list from.
+2. As the number of elements to spawn from an arena is set
+   when the arena is constructed, the item size of the LinkedList must be known
+   at the point of construction as well.
+3. In comparison to the current LinkedList implementation, the values on each
+   node must be stored in an `Option<T>` instead of a plain `T` element.
+
+There is a fundamental implementation difference: While rust's LinkedList uses
+boxes to store the nodes of the linked list the implementation here uses
+references.
+
+To make the naming between the current rust's LinkedList implementation and the
+implementation proposed here easier we will call rust's LinkedList implementation
+in the following `BoxLinkedList` and the proposed LinkedList using references
+`RefLinkedList`.
 
 
 
+Problem:
+- While the color references makes it possible to setup the object relations
+  beteween the `next` and `prev` field in the linked list the problematic part
+  is about splitting the linked list into two parts
+-
 
 
+## STOPED working on this RFC
+
+Working on this RFC idea has been posponsed. The main problem is the way a coloful
+mutable reference can get back to a single mutable reference, which can then get
+hold of mutable fields on a data struct individually, which point to the same
+object and therefore allow the sharing of the recieved object while there is
+another mutable reference around. E.g. consider the following dreamcode:
+
+``` rust
+struct Leaf {
+  id: isize;
+}
+
+struct Node<'a> {
+  lhs: Option<&'a mut Leaf>,
+  rhs: Option<&'a mut Leaf>
+}
+
+fn main() {
+  let mut l = Leaf { id: 0 }
+  let mut n = Node { lhs: None, rhs: None };
+
+  {
+    // Create a colorful reference to the leaf object. Creating two references
+    // of the same color is no problem as
+    let mut l_ref_1 : &mut[c] Leaf = &mut[c] l;
+    let mut l_ref_2 : &mut[c] Leaf = &mut[c] l_ref_1;
+
+    // Create a reference to the node with the same colors as the leafs.
+    let mut n_ref : &mut[c] Node = &mut[c] n;
+
+    // At this point, because the `n_ref` has the color `c`, the fields also
+    // inherit the color and therefore the type of `n_ref.lhs` is of
+    //
+    //   n_ref.n_ref : Option<&'a mut[c] Leaf>
+    //
+    // As the colors work, the following assignment is possible.
+    n_ref.lhs = Some(l_ref_1);
+    n_ref.rhs = Some(l_ref_2);
+  }
+
+  // At this point, the `n.lhs` and `n.rhs` point to the same object. This can
+  // be exploited to share one of the field entries while the other one is still
+  // mutable :/
+  let mut ref lhs = n.lhs.as_mut();
+  let mut ref rhs = n.rhs.as_mut();
+
+  {
+    // Create an immutable borrow of the n.lhs object.
+    let lhs_ref = &lhs;
+    share(lhs_ref);
+
+    // Can stil update the rhs's id, but there is also an immutable borrow to the
+    // same object, which should be impossible -> FAIL :(
+    rhs.id = 2;
+  }
+
+}
+```
+
+The problem in the above example could be prevented in two ways:
+
+1. If a reference has a color, then don't assume the field's references also to
+  inherit the color by default. E.g. in the case above, the type of `n_ref.lhs`
+  is then only: `n_ref.lhs : Option<&'a mut Leaf>` instead of
+  `... : Option<&'a mut[c] Leaf>`.
+2. (jviereck originally had another idea where colorful references could only be
+  assigned to immutable fields of structs but that doesn't make any sense to me
+  now that I think about it once more...)
+
+The point 1. solves the problem, as the assignment to the `n_ref.lhs` requires
+a mutable borrow without colors from `l_ref` the colorful references `l_ref_1` and
+`l_ref_2` are marked as mutable borrowed during this operation. This then prevents
+to store the same object on two fields of the same struct. HOWEVER, with this
+definition creating an ego-cycle as outlined at the very top is no longer possible
+either, as the assignment to the `node.next` field takes a mutable borrow of the
+RHS of the assignemnt, which has the same color as the reciever `node` reference,
+and as an borrow on a color makes all referneces of the same color as borrowed,
+the reciever `node` reference is marked as borrowed and therefore immutable.
 
 
 
