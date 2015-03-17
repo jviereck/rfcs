@@ -109,7 +109,7 @@ fn main() {
 
 ``` rust
 // Reuse
-fn setup_cycle<'a>(arena: &'a mut TypedArena<Node>, nodeA: Node, nodeB: Node): &'a Node
+fn setup_cycle<'a>(arena: &'a TypedArena<Node>, nodeA: Node, nodeB: Node): &'a Node
 {
   let a_ref : &init Node = arena.alloc_init(nodeA); // (5)
   let b_ref : &init Node = arena.alloc_init(nodeB);
@@ -124,32 +124,33 @@ fn main() {
   let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
   let ref = setup_cycle(arena);
 }
+```
 
+``` rust
+// Create a cycle between i `Node`s
+fn setup_cycle<'a>(arena: &'a TypedArena<Node>, size: isize): &'a Node
+{
+  let head_ref: &init Node = arena.alloc_init(Node { next: None });
+  let prev_ref: &init Node = head_ref;
+  let tmp_ref: &init Node = head_ref;
 
-  // Create a cycle between i `Node`s
-  fn setup_cycle<'a>(arena: &'a mut TypedArena<Node>, size: isize): &'a Node
-  {
-    let head_ref: &init Node = arena.alloc_init(Node { next: None });
-    let prev_ref: &init Node = head_ref;
-    let tmp_ref: &init Node = head_ref;
-
-    for x in 1..size {
-      tmp_ref = arena.alloc_init(Node { next: None });
-      prev_ref.next = Some(tmp_ref);
-      prev_ref = tmp_ref;
-    }
-
-    prev_ref.next = Some(head_ref);
-
-    return head_ref;
+  for x in 1..size {
+    tmp_ref = arena.alloc_init(Node { next: None });
+    prev_ref.next = Some(tmp_ref);
+    prev_ref = tmp_ref;
   }
 
-  fn main() {
-    let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
-    let head: &Node = setup_cycle(arena);
+  prev_ref.next = Some(head_ref);
 
-    // More operations on the ring_head here.
-  }
+  return head_ref;
+}
+
+fn main() {
+  let mut arena: TypedArena<Node> = TypedArena::with_capacity(16us);
+  let head: &Node = setup_cycle(arena);
+
+  // More operations on the ring_head here.
+}
 ```
 
 
