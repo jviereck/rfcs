@@ -165,6 +165,10 @@ fn main() {
 }
 ```
 
+## TODO: Explain why it is important to NEVER get hold on an `&mut T` from an `&init T`
+
+
+
 ## Definition of `init-time` and lifetime of `&init T` and `&init? T` references
 
 To make these new pointers work with the existing type system, the idea is to build up the data structures with cyclic references during what we call "initialisation phase" (therefore we call the pointers `&init T` pointers) and after the initialization of the data structures it is possible to get hold of an immutable reference pointer `&T` of the data structure. The conversion from an `&init T` to an `&T` happens at the return statement of a function as shown on line (7) in above example.
@@ -423,6 +427,51 @@ problems.)
 
 Recall that in the current setup of rust it is possible to take a mutable reference to two distinct fields of the same mutable object and mutate them via mutable references.
 
+## Assigning to an immutable or mutable reference field on an `&init T` reference
+
+Throught this section we will use the following `Node` example definition:
+
+```
+struct Node<'a> {
+    lhs: &'a Leaf,
+    rhs: &'a mut Leaf,
+
+    maybe: Option<&'a mut Leaf>
+}
+
+fn main() {
+    let leaf_init /* : &init Leaf */ = arena.alloc_init(Leaf { ... });
+    let node_init /* : &init Node */ = arena.alloc_init(Node { ... });
+
+    // Should the following be valid?
+    node_init.rhs = leaf_init;
+
+    // Should the following be valid? (Assuming the pervious line was not executed?)
+    node_init.maybe = Some(leaf_init);
+}
+
+```
+
+- Assigning to an immutable reference field of type `&U` on an `&init T` reference is only possible for an `&U` reference. Assigning an `&init T` or an `&mut T` reference performes an immutable borrow on the reference.
+
+PROBLEM(jviereck): Assigning to an `&mut T` is problematic. Recall that taking an mutable borrow from an `&init T` is not possible. Therefore, assigning to the `node_init.rhs = leaf_init` causes a type missmatch as `node_init.rhs : &mut Leaf` and `leaf_init : &init Leaf`. When not allowing the conversion of the `leaf_init` to an mutable borrow, this problem can be resolved by introducing the rule, that the type of an `&mut U` field on an `&init T` reference gets converted to an `&init U`. For the above example the type of `node_init.rhs` would then change to `node_init.rhs : &init Leaf`.
+
+The assignment to the `node_init.maybe` should not be possible and it should also not be allowed to change the typing rules, e.g. make `Option<&mut Leaf>` become `Option<&init Leaf>`, as this can be exploited for unsoundness. The problem is, that `Option<&mut Leaf>` is a value of type `U` on the struct and given the rules before for borrowing of values on an `&init T` reference it is possible to take an mutable borrow for such an value. The `Option<T>` type has a method `unwrap()` which returns the content of the option and replaces the option with `None`. This way it would be possible to get hold on an `&mut T` reference that is still an ongoing `&init T`.
+
+``` rust
+    let leaf_init /* : &init Leaf */ = arena.alloc_init(Leaf { ... });
+    let node_init /* : &init Node */ = arena.alloc_init(Node { ... });
+
+    // Assume the following is possible.
+    node_init.maybe = Some(leaf_init);
+
+    // Can get hold on the `leaf_init` reference via calls to unwrap.
+    let maybe_ref : &mut &mut Leaf = node_init.maybe.as_mut().unwrap();
+```
+
+
+
+Assigning an `&init T` reference via `node_init.maybe = Some(leaf_init)`
 
 ### Borrowing a field from an `&init T` reference:
 
