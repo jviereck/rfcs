@@ -245,7 +245,9 @@ struct Node<'a> {
     // In addition to before, the node also has an immutable and mutable leaf
     // reference.
     leaf: &'a Leaf,
-    mut_leaf: &'a mut Leaf
+    mut_leaf: &'a mut Leaf,
+
+    leaf_val: Leaf
 }
 ```
 
@@ -353,13 +355,43 @@ fn setup_a<'a>(arena: &'a TypedArena<Node>) -> &'a Node<'a>
 
 This section discusses reading and borrowing of a filed like the `id` of an `&init Leaf` type.
 
+```rust
+struct Leaf {
+    id: isize;
+}
+```
+
 - As the only way to introduce new `&init T` reference into the system is for objects allocated from an arena via the call to `alloc_init` it should not be possible to get hold to a reference of a field via an `&init T` reference. Therefore, taking an init borrow from an value field `S` of an `&init T` reference is not allowed. (More on this point in the notes below.)
 
-- Taking an immutable or mutable borrow from a field `f` of type `S` of an `&init T` reference is possible. As with `&init T` references there can be multiple references to the same object it becomes hard to track which values are on which `&init T` references are affected by the borrow to the field `f`. Therefore, an immutable or mutable borrow of the field `f` on some `&init T` reference causes a partial borrow on all fiels `f` of all `&init T` references with exactly the type `T`.
+- Taking an immutable or mutable borrow from a field `f` of type `S` of an `&init T` reference is possible. As with `&init T` references there can be multiple references to the same object it becomes hard to track which values are on which `&init T` references are affected by the borrow to the field `f`. Therefore, an immutable or mutable borrow of the field `f` on some `&init T` reference causes a borrow on all fiels `f` of all `&init T` references with exactly the type `T`.
 
-CONTINUE(jviereck): How exactly does partially moved works on a struct? Can this be a problem here?
+``` rust
+  let a_init_0 : &init Node = arena.alloc_init(Node { id: 0, ... /* other fields */ });
+  let a_init_1 : &init Node = arena.alloc_init(Node { id: 1, ... /* other fields */ });
+
+  let id_ref_0 = &mut a_init_0.id;
+
+  // Borrow the content of `Node.id` is rejected here as there is already a borrow
+  // to the field `Node.id` above. This is necessary as there might be multiple `&init Node`
+  // that point to the same object and therefore taking another mutable borrow
+  // can cause two mutable borrowes to the same value, which should be prevented
+  // at all cost as `&mut T` implies an unique borrow to the content.
+  let id_ref_1 = &mut a_init_1.id;
+```
+
+- Similar to the behavior of `&T` and `&mut T` borrowes it is not possible to move a field value out of an `&init T` reference. Moving new values into the field is possible as long as the field `f` is not (mutable or immutable) borrowed. (SEE: https://bitbucket.org/j4c/eth-rust-cycles/src/47f28a2f2aa1dc/20150317/struct_move.rs#cl-27.)
+
+``` rust
+  let a_init : &init Node = ...
+  let leaf = a_init.leaf_val; // IS NOT allowed - tries to move value from borrowed content.
+
+  let new_leaf = Leaf { id : 42 };
+  a_init.leaf_val = new_leaf; // IS allowed - updates value of borrowed content.
+```
 
 ### NOTES on what's the problem with `&init S` for a value field of type `S` on a reference `&init T`
+
+TODO(jviereck): Might want to remove this section in the final RFC version.
 
 Taking an init borrow from a value field of an `&init T` reference without any further restrictions is not possible. The problem is, that there could be another `&init Leaf` reference to the same object and updating the field with a new value causes the destructor of the first value to run.
 
